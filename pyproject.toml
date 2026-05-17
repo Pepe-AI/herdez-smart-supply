@@ -1,0 +1,48 @@
+[project]
+name = "herdez-smart-supply"
+version = "0.1.0"
+description = "Modelo predictivo de quiebres de stock + Agente IA con LangGraph"
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb",
+    "lightgbm",
+    "langgraph",
+    "langchain-google-genai",
+    "streamlit",
+    "pandas",
+    "openpyxl",
+    "pydantic-settings",
+    "python-dotenv",
+    "scikit-learn",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+    "mypy",
+    "pandas-stubs",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["src.data.*", "src.agent.*", "src.app.*"]
+strict = false
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["sklearn.*", "lightgbm.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
