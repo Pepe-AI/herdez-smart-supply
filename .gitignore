@@ -30,5 +30,8 @@ Thumbs.db
 # Data files
 *.xlsx
 
+# Generated model artifacts
+models/*.txt
+
 # Local config
 CLAUDE.local.md
