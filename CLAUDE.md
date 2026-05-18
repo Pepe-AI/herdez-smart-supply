@@ -26,12 +26,12 @@ ruff check src/ tests/ && ruff format src/ tests/
 
 ## Hechos del dataset (NO inventar señal que no existe)
 
-El EDA mostró que estas variables NO tienen señal predictiva en los datos:
-- `Promocion_Activa`: ventas con promo (137.5) ≤ sin promo (140.5).
-- `Clima`: diferencias entre Despejado/Lluvia/Tormenta < 3%.
-
-Mantenerlas en el pipeline como placeholders, pero NO presentarlas como
-features importantes. Si el modelo les asigna alta importancia, revisar.
+Señal de features categóricas (verificado con tests formales):
+- `Promocion_Activa`: sin efecto en ventas (Welch p=0.47) pero reduce tasa
+  de quiebre en 4 de 5 SKUs (hasta -21pp). Incluir como feature; dejar que
+  el modelo decida su importancia.
+- `Clima`: sin señal ni en ventas (Kruskal p=0.72) ni en target (Chi² p=0.93).
+  Mantener como placeholder.
 
 Estas variables son atributos, no features dinámicas:
 - `Lead_Time_Dias`: constante por CEDI (Norte=3, resto=5).
@@ -42,22 +42,24 @@ La única variable de costo que varía día a día es `Costo_Transferencia_Unida
 Stock = 0 NUNCA ocurre en el histórico (mínimo observado: 50 unidades).
 Por eso el target es un proxy proyectado, no una observación directa.
 
-## Limitación conocida: leakage en target proxy
+## Leakage resuelto: estrategia de features lagged
 
 El target `(stock_actual - ventas_rolling_7d * 5) < 0` es determinista
-sobre `stock_actual` y `ventas_unidades`. Si estas variables son features,
-el modelo aprende la fórmula (AUC-PR ≈ 1.0) en lugar de patrones
-predictivos reales. Sin ellas, AUC-PR cae a ~0.53.
+sobre `stock_actual` y `ventas_unidades`. Si se usan como features,
+el modelo aprende la fórmula (AUC-PR ≈ 1.0) en lugar de patrones reales.
 
-**Decisión para el prototipo:** se mantiene como proxy (es lo que pide el
-reto) pero se documenta en la presentación que el AUC alto es artefacto
-del target determinista. En producción se usaría un target forward-looking
-(stock real en t+5 < umbral crítico).
+**Solución implementada:** mantener el target proxy (interpretable) pero
+usar solo features lagged (t-1 o anterior): `stock_lag_{1,3,5,7}`,
+`ventas_lag_{1,3,5,7}`, `ventas_rolling_7d_lag1`, ratios de cobertura
+lagged. `stock_actual` y `ventas_unidades` están en EXCLUDE_COLS.
+
+AUC-PR honesto con esta estrategia: ~0.45 ± 0.06 (TimeSeriesSplit, 5 folds).
+Baseline random ≈ 0.335 (prevalencia del target).
 
 ## Definiciones de negocio
 
 ```python
-# Target del modelo ML (proxy — ver limitación de leakage arriba)
+# Target del modelo ML
 quiebre_proyectado = (stock_actual - ventas_promedio_7d * 5) < 0
 
 # Lógica de decisión del agente
