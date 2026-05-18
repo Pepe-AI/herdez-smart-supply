@@ -42,10 +42,22 @@ La única variable de costo que varía día a día es `Costo_Transferencia_Unida
 Stock = 0 NUNCA ocurre en el histórico (mínimo observado: 50 unidades).
 Por eso el target es un proxy proyectado, no una observación directa.
 
+## Limitación conocida: leakage en target proxy
+
+El target `(stock_actual - ventas_rolling_7d * 5) < 0` es determinista
+sobre `stock_actual` y `ventas_unidades`. Si estas variables son features,
+el modelo aprende la fórmula (AUC-PR ≈ 1.0) en lugar de patrones
+predictivos reales. Sin ellas, AUC-PR cae a ~0.53.
+
+**Decisión para el prototipo:** se mantiene como proxy (es lo que pide el
+reto) pero se documenta en la presentación que el AUC alto es artefacto
+del target determinista. En producción se usaría un target forward-looking
+(stock real en t+5 < umbral crítico).
+
 ## Definiciones de negocio
 
 ```python
-# Target del modelo ML
+# Target del modelo ML (proxy — ver limitación de leakage arriba)
 quiebre_proyectado = (stock_actual - ventas_promedio_7d * 5) < 0
 
 # Lógica de decisión del agente
