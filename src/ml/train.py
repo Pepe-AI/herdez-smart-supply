@@ -37,8 +37,10 @@ EXCLUDE_COLS: list[str] = [
     "cedi",
     "clima",  # Usamos clima_encoded en su lugar
     "quiebre_proyectado",  # Target
-    "costo_quiebre_stock_diario",  # Info de costo, no feature predictiva
-    "costo_transferencia_unidad",  # Info de costo, no feature predictiva
+    "stock_actual",  # Leakage: participa en la fórmula del target
+    "ventas_unidades",  # Leakage: base del rolling que define el target
+    "costo_quiebre_stock_diario",  # Info de costo para el agente, no feature
+    "costo_transferencia_unidad",  # Info de costo para el agente, no feature
 ]
 
 
