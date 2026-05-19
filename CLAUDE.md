@@ -97,6 +97,25 @@ carga + documentación). Jornada de 8h con overlap parcial → 3 simultáneas
 máximo. Con 4 CEDIs → 12 transferencias/día en la red.
 (Detalle: `docs/architecture.md`)
 
+### Bugs detectados en meta-auditoría (Día 2)
+
+**Bug 1: asimetría en selección de origen.** El script inline de la
+primera auditoría usaba "primer origen válido" (iterrows + break) para
+los baselines mientras `costs_v2.select_origin()` usa "mejor origen"
+(mayor excedente) para el modelo. Corregido: todas las estrategias
+usan `select_origin()` de `costs_v2.py`.
+
+**Bug 2: leakage temporal en by_stock_bajo.** Usaba `stock_actual`
+(stock post-ventas del día) para priorizar al inicio del día. Eso es
+información del futuro. Corregido a `stock_lag_1` (stock de ayer).
+
+**Impacto en ranking bajo N=3:**
+- Modelo: 5° → 3° (mejora dos posiciones)
+- by_stock_bajo: 1° → 5° (pierde cuatro posiciones, su ventaja era leakage)
+- Conclusión: el modelo es competitivo ($1.14M/fold), pierde contra
+  tasa_base ($930k) y costo_quiebre ($937k) por ~22%.
+  (Fuente: script de meta-auditoría, `docs/meta_auditoria_dia2.md`)
+
 ## Definiciones de negocio
 
 ```python
