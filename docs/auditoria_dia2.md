@@ -1,5 +1,11 @@
 # Auditoría del Día 2 — Resultados
 
+> **SUPERSEDIDO por `meta_auditoria_dia2.md`.** Esta auditoría contiene
+> dos bugs metodológicos (asimetría en selección de origen + leakage
+> temporal en by_stock_bajo) que invalidan el ranking y los costos
+> reportados. Los números corregidos están en la meta-auditoría.
+> Se conserva este documento como registro histórico del proceso.
+
 ## Tarea 1: Headline bajo lupa
 
 ### Código del baseline "random truncated"
