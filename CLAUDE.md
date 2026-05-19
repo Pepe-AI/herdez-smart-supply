@@ -110,10 +110,14 @@ usan `select_origin()` de `costs_v2.py`.
 información del futuro. Corregido a `stock_lag_1` (stock de ayer).
 
 **Impacto en ranking bajo N=3:**
-- Modelo: 5° → 3° (mejora dos posiciones)
+- Modelo: 5° → 3° de 6 baselines (mejora dos posiciones)
 - by_stock_bajo: 1° → 5° (pierde cuatro posiciones, su ventaja era leakage)
-- Conclusión: el modelo es competitivo ($1.14M/fold), pierde contra
-  tasa_base ($930k) y costo_quiebre ($937k) por ~22%.
+
+**Números headline verificados (meta-auditoría):**
+- Costo del modelo bajo N=3: $1,144,591/fold
+- Mejor baseline (tasa_base): $929,913/fold
+- Brecha modelo vs mejor baseline: $214,678/fold (+23%)
+- Posición: 3° de 6 baselines honestos
   (Fuente: script de meta-auditoría, `docs/meta_auditoria_dia2.md`)
 
 ## Definiciones de negocio
