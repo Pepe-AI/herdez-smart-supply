@@ -1,4 +1,4 @@
-"""Compare cost strategies: inaction, all-positive, heuristic, base-rate, ML."""
+"""Compare cost strategies with realistic transfer volumes."""
 
 import sys
 import io
@@ -41,8 +41,16 @@ df["sku_enc"] = df["SKU_ID"].astype("category").cat.codes
 df["cedi_enc"] = df["CEDI"].astype("category").cat.codes
 df["clima_enc"] = df["Clima"].map({"Despejado": 0, "Lluvia": 1, "Tormenta": 2})
 
+# Deficit estimado con info de t-1 (lo que el sistema sabria al decidir)
+df["deficit_estimado"] = (
+    df["ventas_rolling_7d_lag1"] * 5 - df["stock_lag_1"]
+).clip(lower=0)
+
 df_clean = df.dropna(
-    subset=["ventas_rolling_7d", "ventas_rolling_7d_lag1", "stock_lag_7", "coverage_ratio_lag"]
+    subset=[
+        "ventas_rolling_7d", "ventas_rolling_7d_lag1",
+        "stock_lag_7", "coverage_ratio_lag",
+    ]
 ).reset_index(drop=True)
 
 feats = [
@@ -60,13 +68,23 @@ tscv = TimeSeriesSplit(n_splits=5)
 DIAS = 5
 
 
-def compute_costs(y_true, y_pred, costo_q, costo_t):
+def compute_costs(y_true, y_pred, costo_q, costo_t_unidad, deficit_est):
+    """Costos con unidades reales transferidas.
+
+    - TP/FP: se transfieren deficit_est unidades a costo_t_unidad cada una
+    - FN: quiebre no detectado, costo_q * DIAS
+    - Si deficit_est es 0 pero y_pred=1, se transfiere un minimo de seguridad
+    """
     tp_mask = (y_true == 1) & (y_pred == 1)
     fp_mask = (y_true == 0) & (y_pred == 1)
     fn_mask = (y_true == 1) & (y_pred == 0)
 
-    tp_cost = float(np.sum(costo_t[tp_mask]))
-    fp_cost = float(np.sum(costo_t[fp_mask]))
+    # Costo de transferencia = unidades * costo por unidad
+    # Minimo 50 unidades cuando se decide transferir (lote minimo logistico)
+    units_moved = np.maximum(deficit_est, 50.0)
+
+    tp_cost = float(np.sum(costo_t_unidad[tp_mask] * units_moved[tp_mask]))
+    fp_cost = float(np.sum(costo_t_unidad[fp_mask] * units_moved[fp_mask]))
     fn_cost = float(np.sum(costo_q[fn_mask] * DIAS))
 
     cost_no_model = float(np.sum(costo_q[y_true == 1] * DIAS))
@@ -74,11 +92,10 @@ def compute_costs(y_true, y_pred, costo_q, costo_t):
 
     return {
         "cost_total": cost_total,
-        "tp_cost": tp_cost,
-        "fp_cost": fp_cost,
-        "fn_cost": fn_cost,
+        "tp_cost": tp_cost, "fp_cost": fp_cost, "fn_cost": fn_cost,
         "cost_no_model": cost_no_model,
         "savings_vs_inaction": cost_no_model - cost_total,
+        "n_transfers": int(np.sum(y_pred == 1)),
     }
 
 
@@ -96,21 +113,22 @@ for fold, (tr_idx, va_idx) in enumerate(tscv.split(df_eval), 1):
     y_val = y.iloc[va_idx].values
     costo_q = df_val["Costo_Quiebre_Stock_Diario"].values.astype(float)
     costo_t = df_val["Costo_Transferencia_Unidad"].values.astype(float)
+    deficit = df_val["deficit_estimado"].values.astype(float)
 
     # 0. Inaccion total
     strategies["inaccion_total"].append(
-        compute_costs(y_val, np.zeros(len(y_val), dtype=int), costo_q, costo_t)
+        compute_costs(y_val, np.zeros(len(y_val), dtype=int), costo_q, costo_t, deficit)
     )
 
     # 1. All positive
     strategies["all_positive"].append(
-        compute_costs(y_val, np.ones(len(y_val), dtype=int), costo_q, costo_t)
+        compute_costs(y_val, np.ones(len(y_val), dtype=int), costo_q, costo_t, deficit)
     )
 
-    # 2. Heuristica: stock_lag_1 - ventas_lag_1 * 5 < 0
+    # 2. Heuristica
     heur_pred = (df_val["stock_lag_1"] - df_val["ventas_lag_1"] * 5 < 0).astype(int).values
     strategies["heuristic_lag1"].append(
-        compute_costs(y_val, heur_pred, costo_q, costo_t)
+        compute_costs(y_val, heur_pred, costo_q, costo_t, deficit)
     )
 
     # 3. Tasa base con gate 0.5
@@ -123,7 +141,7 @@ for fold, (tr_idx, va_idx) in enumerate(tscv.split(df_eval), 1):
     )
     base_pred = (proba_base >= 0.5).astype(int)
     strategies["tasa_base_gate05"].append(
-        compute_costs(y_val, base_pred, costo_q, costo_t)
+        compute_costs(y_val, base_pred, costo_q, costo_t, deficit)
     )
 
     # 4. LightGBM
@@ -134,13 +152,13 @@ for fold, (tr_idx, va_idx) in enumerate(tscv.split(df_eval), 1):
     m.fit(df_train[feats], y.iloc[tr_idx])
     lgbm_pred = (m.predict_proba(df_val[feats])[:, 1] >= 0.5).astype(int)
     strategies["lgbm_lagged"].append(
-        compute_costs(y_val, lgbm_pred, costo_q, costo_t)
+        compute_costs(y_val, lgbm_pred, costo_q, costo_t, deficit)
     )
 
 # === TABLE ===
-print("=" * 100)
-print("TABLA COMPARATIVA DE COSTOS (TimeSeriesSplit 5 folds, MXN)")
-print("=" * 100)
+print("=" * 105)
+print("COSTOS CON UNIDADES REALES (deficit_estimado, min 50 unidades)")
+print("=" * 105)
 
 summary = {}
 for name, folds_data in strategies.items():
@@ -152,19 +170,20 @@ for name, folds_data in strategies.items():
         "tp": np.mean([f["tp_cost"] for f in folds_data]),
         "fp": np.mean([f["fp_cost"] for f in folds_data]),
         "fn": np.mean([f["fn_cost"] for f in folds_data]),
+        "transfers": np.mean([f["n_transfers"] for f in folds_data]),
     }
 
 ap_cost = summary["all_positive"]["cost"]
 
-header = f"{'Estrategia':25s} {'Costo total':>18s} {'Ahorro vs inaccion':>22s} {'Ahorro vs all_pos':>22s}"
-print(header)
-print("-" * 100)
+print(f"{'Estrategia':25s} {'Costo total':>18s} {'Ahorro vs inaccion':>22s} {'vs all_pos':>15s} {'Transfers':>10s}")
+print("-" * 105)
 for name, s in summary.items():
     sav_ap = ap_cost - s["cost"]
     print(
-        f"{name:25s} ${s['cost']:>12,.0f} +/-{s['cost_std']:>8,.0f}   "
-        f"${s['sav_inaction']:>12,.0f} +/-{s['sav_inaction_std']:>8,.0f}   "
-        f"${sav_ap:>12,.0f}"
+        f"{name:25s} ${s['cost']:>12,.0f}+/-{s['cost_std']:>8,.0f}  "
+        f"${s['sav_inaction']:>12,.0f}+/-{s['sav_inaction_std']:>8,.0f}  "
+        f"${sav_ap:>12,.0f}  "
+        f"{s['transfers']:>8.0f}"
     )
 
 print()
@@ -179,7 +198,11 @@ ap_sav = summary["all_positive"]["sav_inaction"]
 lgbm_sav = summary["lgbm_lagged"]["sav_inaction"]
 lgbm_vs_ap = ap_cost - summary["lgbm_lagged"]["cost"]
 heur_vs_ap = ap_cost - summary["heuristic_lag1"]["cost"]
-print(f"all_positive ahorra vs inaccion: ${ap_sav:,.0f} MXN")
-print(f"  Eso es {ap_sav / lgbm_sav * 100:.1f}% del ahorro del modelo vs inaccion")
-print(f"Modelo vs all_positive: ${lgbm_vs_ap:+,.0f} MXN")
-print(f"Heuristica vs all_positive: ${heur_vs_ap:+,.0f} MXN")
+
+print(f"all_positive ahorra vs inaccion: ${ap_sav:,.0f}")
+print(f"lgbm_lagged ahorra vs inaccion: ${lgbm_sav:,.0f}")
+print(f"Modelo vs all_positive: ${lgbm_vs_ap:+,.0f}")
+print(f"Heuristica vs all_positive: ${heur_vs_ap:+,.0f}")
+print()
+print(f"Costo FP promedio por transferencia (all_positive): ${summary['all_positive']['fp']/summary['all_positive']['transfers']:.0f}")
+print(f"Costo FN promedio por quiebre no detectado: ${summary['lgbm_lagged']['fn']/(176*0.57):.0f}")
