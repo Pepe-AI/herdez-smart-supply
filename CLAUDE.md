@@ -56,6 +56,47 @@ lagged. `stock_actual` y `ventas_unidades` están en EXCLUDE_COLS.
 AUC-PR honesto con esta estrategia: ~0.45 ± 0.06 (TimeSeriesSplit, 5 folds).
 Baseline random ≈ 0.335 (prevalencia del target).
 
+## Hallazgos críticos del Día 1
+
+### Ratio real de costos: 53:1
+
+- FN promedio: $53,333 MXN. Cálculo: mix ponderado de 5 SKUs ×
+  costo_quiebre × 5 días exposición. Salsas: $15k×5=$75k.
+  Atún/Champiñones/Mole: $8k×5=$40k. Promedio: ($75k×2+$40k×3)/5=$54k.
+  (Fuente: `scripts/cost_baselines.py`)
+- FP promedio: $997 MXN. Cálculo: costo_transferencia_unidad (~$10.45) ×
+  max(deficit_estimado, 50 unidades mínimas). Promedio ponderado de
+  all_positive: $175,423 FP / 176 transfers.
+  (Fuente: `scripts/cost_baselines.py`)
+- Ratio: $53,333 / $997 = **53:1**.
+
+### Umbral económico óptimo: 0.0187
+
+Transferir si: `p_quiebre > costo_FP / (costo_FP + costo_FN)`
+= $997 / ($997 + $53,333) = 0.0187.
+(Fuente: `scripts/threshold_sweep.py`)
+
+### Hallazgo central: all_positive es Pareto-óptimo bajo capacidad ilimitada
+
+Con ratio 53:1, no existe umbral del modelo que supere a transferir
+siempre. La curva costo-vs-umbral es monótonamente creciente (sweep
+de umbrales 0.01 a 0.50, `scripts/threshold_sweep.py`). Esto es
+propiedad del régimen de costos, no debilidad del modelo.
+
+### Decisión arquitectónica
+
+El modelo se mantiene como sensor de probabilidades diarias. Su valor
+económico emerge bajo restricciones logísticas (capacidad limitada),
+donde priorizar alertas por costo esperado supera al orden arbitrario.
+Simulación con restricciones: pendiente Día 2 (`costs_v2.py`).
+
+### Parámetro de diseño del agente: N=3 transferencias/día por CEDI
+
+Justificación: cada transferencia requiere ~2h (coordinación + picking +
+carga + documentación). Jornada de 8h con overlap parcial → 3 simultáneas
+máximo. Con 4 CEDIs → 12 transferencias/día en la red.
+(Detalle: `docs/architecture.md`)
+
 ## Definiciones de negocio
 
 ```python
@@ -66,6 +107,7 @@ quiebre_proyectado = (stock_actual - ventas_promedio_7d * 5) < 0
 costo_no_actuar  = costo_quiebre_diario * p_quiebre * dias_expuestos
 costo_transferir = costo_transferencia_unidad * unidades_movidas
 # Transferir si costo_transferir < costo_no_actuar AND origen no entra en riesgo
+# Umbral económico: p > 0.0187 (equivalente al ratio de costos 53:1)
 ```
 
 Ventana = 5 días (coincide con lead time del CEDI más lento; alerta accionable).
