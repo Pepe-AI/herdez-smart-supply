@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     # Ruta del modelo entrenado
     model_path: Path = Path("models/lgbm_quiebre.txt")
 
+    # Gemini API key (vacío = modo mock para tests)
+    google_api_key: str = ""
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
