@@ -181,3 +181,68 @@ original era falsa.
   los baselines simples no hacen.
 - Con más datos (12+ meses), el modelo debería mejorar; las reglas
   estáticas no.
+
+---
+
+## Bug 3 — Divergencia silenciosa entre backtest y agente
+
+Detectado en: debugging del Día 3, fase 2 de validación.
+
+### Síntoma
+
+El backtest (`run_capacity_comparison`) reportaba model_prioritized
+= $1,038,008/fold. La meta-auditoría documentaba $1,144,591/fold.
+Diferencia: -9.3%.
+
+### Causa
+
+`simulate_day_with_priority()` (función del backtest) divergía del
+agente en tres aspectos:
+
+1. **Scoring**: usaba `p × costo_quiebre × dias` (costo esperado
+   puro) en vez de `beneficio_neto` (costo esperado - costo de
+   transferencia).
+2. **Sin filtro de umbral económico**: no filtraba por p > 0.0187.
+3. **Sin filtro de beneficio_neto > 0**: transfería aunque el
+   beneficio neto fuera negativo.
+
+La meta-auditoría usó su propia función inline (`simulate_day_fair`,
+no guardada en repo) que aparentemente usaba la pipeline del agente
+(`generate_alerts` + `prioritize_and_allocate`) para model_prioritized
+y `simulate_day_fair` sin filtros para los baselines.
+
+### Corrección
+
+`run_capacity_comparison()` ahora usa `simulate_day()` (la pipeline
+completa del agente: umbral + beneficio_neto + select_origin) para
+model_prioritized. Las 6 baselines siguen usando
+`simulate_day_with_priority()` sin filtros.
+
+`simulate_day_with_priority()` acepta `y_proba` opcional que activa
+filtros de umbral y beneficio_neto (para tests de equivalencia).
+
+Test agregado: `TestBacktestMatchesAgentDecisions` verifica que
+`simulate_day()` y `simulate_day_with_priority(y_proba=...)` producen
+transferencias y costos idénticos.
+
+### Impacto
+
+model_prioritized pasa de $1,038,008 a $1,046,657 (+$8,649).
+Brecha residual vs meta-auditoría: -8.6% ($1,046,657 vs $1,144,591).
+Esta brecha se debe a que el script inline de la meta-auditoría no
+se guardó en el repo y no es reproducible exactamente. El ranking
+es idéntico en ambas versiones.
+
+### Números de producción actualizados
+
+| Estrategia | Producción | Meta-auditoría | Diff |
+|---|---|---|---|
+| by_tasa_base | $915,470 | $929,913 | -1.6% |
+| by_costo_quiebre | $949,974 | $936,815 | +1.4% |
+| model_prioritized | $1,046,657 | $1,144,591 | -8.6% |
+| heuristic_deficit | $1,449,132 | $1,522,761 | -4.8% |
+| by_stock_lag1 | $1,643,500 | $1,644,109 | -0.0% |
+| fifo | $1,723,786 | $1,724,314 | -0.0% |
+| inacción | $3,634,000 | $3,634,000 | 0.0% |
+
+Brecha modelo vs mejor baseline: $131,187/fold (+14.3%).

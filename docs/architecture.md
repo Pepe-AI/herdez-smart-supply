@@ -107,3 +107,24 @@ Se ejecuta diariamente sobre el inventario del dia anterior.
 3. **Calcular volumen**: `min(deficit_destino, excedente_origen * 0.5)`.
 4. **No actuar cuando**: capacidad agotada del CEDI origen, o ningun
    origen viable (todos en riesgo para ese SKU).
+
+### Política de filtros del backtest
+
+Todas las estrategias del backtest (`run_capacity_comparison`) aplican
+dos filtros antes de priorizar:
+
+1. **Filtro de umbral económico** (p_quiebre > 0.0187): derivado del
+   régimen de costos 53:1. Representa "¿vale la pena actuar
+   económicamente?". La probabilidad p viene del modelo ML para todas
+   las estrategias, incluso las que no usan p para priorizar.
+
+2. **Filtro de beneficio neto positivo**: costo_esperado_no_actuar >
+   costo_transferencia. Representa "¿el costo de actuar es menor que
+   el costo esperado de no actuar?".
+
+Las 6 estrategias activas se diferencian únicamente en el criterio
+de priorización del conjunto ya filtrado. Esta política garantiza que
+la comparación sea justa y que ninguna estrategia tome decisiones
+económicamente irracionales.
+
+Decisión documentada el 2026-05-19, debugging Día 3 fase 2.

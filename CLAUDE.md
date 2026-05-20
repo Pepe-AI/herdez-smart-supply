@@ -19,8 +19,9 @@ uv sync                              # instalar deps
 python -m src.data.ingest            # Excel → DuckDB
 python -m src.ml.train               # entrenar y guardar modelo
 python -m src.ml.evaluate            # métricas con TimeSeriesSplit
-streamlit run src/app/main.py        # dashboard
-pytest tests/ -v                     # tests
+python -m scripts.precompute_backtest # generar parquets para dashboard
+streamlit run src/app/main.py        # dashboard (3 tabs: Backtest, Alertas, Chat)
+pytest tests/ -v                     # tests (46 total)
 ruff check src/ tests/ && ruff format src/ tests/
 ```
 
@@ -109,16 +110,58 @@ usan `select_origin()` de `costs_v2.py`.
 (stock post-ventas del día) para priorizar al inicio del día. Eso es
 información del futuro. Corregido a `stock_lag_1` (stock de ayer).
 
+**Bug 3: divergencia silenciosa entre backtest y agente (Día 3).**
+`simulate_day_with_priority()` divergía del agente en 3 aspectos:
+(1) scoring con costo_esperado puro en vez de beneficio_neto,
+(2) sin filtro de umbral económico (p > 0.0187),
+(3) sin filtro de beneficio_neto > 0.
+Corregido: `y_proba` es obligatorio, los dos filtros económicos se
+aplican uniformemente a las 7 estrategias antes de priorizar.
+
 **Impacto en ranking bajo N=3:**
 - Modelo: 5° → 3° de 6 baselines (mejora dos posiciones)
 - by_stock_bajo: 1° → 5° (pierde cuatro posiciones, su ventaja era leakage)
 
-**Números headline verificados (meta-auditoría):**
-- Costo del modelo bajo N=3: $1,144,591/fold
-- Mejor baseline (tasa_base): $929,913/fold
-- Brecha modelo vs mejor baseline: $214,678/fold (+23%)
-- Posición: 3° de 6 baselines honestos
-  (Fuente: script de meta-auditoría, `docs/meta_auditoria_dia2.md`)
+**Números headline verificados (producción, filtros uniformes):**
+- Costo del modelo bajo N=3: $1,046,657/fold (producción, costs_v2.py)
+- Mejor baseline (tasa_base): $912,709/fold
+- Brecha modelo vs mejor baseline: $133,948/fold (+14.7%)
+- Posición: 3° de 7 baselines honestos
+- Ranking:
+  tasa_base > costo_quiebre > modelo > heuristic_deficit > stock_lag1 > fifo > inacción
+  (Fuente: `costs_v2.run_capacity_comparison`, `data/backtest_results.parquet`)
+
+## Hallazgos del Día 3
+
+### Dashboard Streamlit funcional (3 tabs)
+
+- **Backtest:** tabla de 7 estrategias, gráficos comparativos, threshold sweep
+- **Alertas:** explorador por fold/fecha, tabla con decisiones coloreadas,
+  capacidad por CEDI
+- **Chat:** integración con agente LangGraph, Gemini 2.5 Flash (o mock)
+
+### 7 estrategias portadas a código de producción
+
+`simulate_day_with_priority()` unifica la lógica de todas las estrategias:
+misma función, mismo `select_origin()`, mismos filtros económicos
+(p > 0.0187 + beneficio_neto > 0), solo cambian los scores de prioridad.
+`y_proba` es obligatorio (no opcional). Esto corrige permanentemente
+los 3 bugs de las auditorías.
+
+### Integración Gemini: auto-detección
+
+`get_llm()` en `graph.py` lee `GOOGLE_API_KEY` de `.env`:
+- Con key: `ChatGoogleGenerativeAI(model="gemini-2.5-flash")`
+- Sin key: `_MockLLM` que aprueba el plan determinista
+- Test de equivalencia decisional (skip si no hay key): verifica que
+  los nodos deterministas producen transfers idénticos con ambos LLMs
+
+### Tests: 48 total (47 pass, 1 skip)
+
+- 20 tests de costs_v2 (incluye equivalencia backtest-agente + stock_lag_1 vs stock_actual)
+- 7 tests de agente (incluye equivalencia Gemini, skip si no hay key)
+- 14 tests de features
+- 7 tests de economics
 
 ## Definiciones de negocio
 
@@ -134,6 +177,15 @@ costo_transferir = costo_transferencia_unidad * unidades_movidas
 ```
 
 Ventana = 5 días (coincide con lead time del CEDI más lento; alerta accionable).
+
+## Scope de verificación de tipos
+
+- `mypy --strict` aplica a: `src/economics/`, `src/ml/`
+- `src/agent/` queda fuera: LangGraph usa signatures dinámicas
+  (StateGraph, tool_calls) que generan falsos positivos con strict.
+  Configurado en `pyproject.toml` como override con `strict = false`.
+- `src/data/`, `src/app/` también fuera (I/O, Streamlit).
+- Comando de validación: `mypy src/economics/ src/ml/`
 
 ## Convenciones
 
