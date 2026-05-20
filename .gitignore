@@ -38,3 +38,9 @@ models/*.txt
 
 # Local config
 CLAUDE.local.md
+
+# Claude Code session data
+.claude/
+
+# Word documents (binary, not tracked)
+*.docx

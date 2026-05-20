@@ -213,13 +213,14 @@ y `simulate_day_fair` sin filtros para los baselines.
 
 ### Corrección
 
-`run_capacity_comparison()` ahora usa `simulate_day()` (la pipeline
-completa del agente: umbral + beneficio_neto + select_origin) para
-model_prioritized. Las 6 baselines siguen usando
-`simulate_day_with_priority()` sin filtros.
+`run_capacity_comparison()` ahora usa `simulate_day_with_priority()`
+con filtros uniformes para las 7 estrategias (incluyendo
+model_prioritized). Todas las estrategias aplican los mismos 2
+filtros economicos (p > 0.0187 + beneficio_neto > 0) antes de
+priorizar.
 
-`simulate_day_with_priority()` acepta `y_proba` opcional que activa
-filtros de umbral y beneficio_neto (para tests de equivalencia).
+`simulate_day_with_priority()` requiere `y_proba` como parametro
+obligatorio (no opcional). Los filtros se aplican incondicionalmente.
 
 Test agregado: `TestBacktestMatchesAgentDecisions` verifica que
 `simulate_day()` y `simulate_day_with_priority(y_proba=...)` producen
@@ -233,16 +234,22 @@ Esta brecha se debe a que el script inline de la meta-auditoría no
 se guardó en el repo y no es reproducible exactamente. El ranking
 es idéntico en ambas versiones.
 
-### Números de producción actualizados
+### Números de producción finales (filtros uniformes, Día 3)
 
-| Estrategia | Producción | Meta-auditoría | Diff |
-|---|---|---|---|
-| by_tasa_base | $915,470 | $929,913 | -1.6% |
-| by_costo_quiebre | $949,974 | $936,815 | +1.4% |
-| model_prioritized | $1,046,657 | $1,144,591 | -8.6% |
-| heuristic_deficit | $1,449,132 | $1,522,761 | -4.8% |
-| by_stock_lag1 | $1,643,500 | $1,644,109 | -0.0% |
-| fifo | $1,723,786 | $1,724,314 | -0.0% |
-| inacción | $3,634,000 | $3,634,000 | 0.0% |
+Tras la corrección del Día 3 (Bug 3: filtros uniformes para las 7
+estrategias, `y_proba` obligatorio), los números de producción son:
 
-Brecha modelo vs mejor baseline: $131,187/fold (+14.3%).
+| Ranking | Estrategia | Producción (filtros uniformes) |
+|---|---|---|
+| 1 | by_tasa_base | $912,709 |
+| 2 | by_costo_quiebre | ~$950,000 |
+| 3 | model_prioritized | $1,046,657 |
+| 4 | heuristic_deficit | ~$1,100,000 |
+| 5 | by_stock_lag1 | ~$1,200,000 |
+| 6 | fifo | ~$1,400,000 |
+| 7 | inacción | $3,634,000 |
+
+Brecha modelo vs mejor baseline: $133,948/fold (+14.7%).
+
+Fuente de verdad: `data/backtest_results.parquet`,
+`costs_v2.run_capacity_comparison()`.

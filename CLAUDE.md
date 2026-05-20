@@ -21,7 +21,7 @@ python -m src.ml.train               # entrenar y guardar modelo
 python -m src.ml.evaluate            # métricas con TimeSeriesSplit
 python -m scripts.precompute_backtest # generar parquets para dashboard
 streamlit run src/app/main.py        # dashboard (3 tabs: Backtest, Alertas, Chat)
-pytest tests/ -v                     # tests (46 total)
+pytest tests/ -v                     # tests (48 total)
 ruff check src/ tests/ && ruff format src/ tests/
 ```
 
@@ -162,6 +162,59 @@ los 3 bugs de las auditorías.
 - 7 tests de agente (incluye equivalencia Gemini, skip si no hay key)
 - 14 tests de features
 - 7 tests de economics
+
+## Hallazgos del Día 4
+
+### Arquitectura GCP documentada
+
+`docs/architecture_gcp.md` con 4 secciones completas:
+- **Diagrama:** dos versiones Mermaid (TB detallado + LR para slides),
+  happy path con tiempos por nodo, nota de seguridad (Secret Manager,
+  Workload Identity, IAM por servicio).
+- **Justificación por servicio:** 6 servicios (BigQuery, Vertex AI
+  Pipelines, Model Registry, Cloud Run, Gemini API, Cloud Build),
+  cada uno con conexión a hallazgos del prototipo.
+- **Mapeo prototipo → producción:** tabla de 8 componentes (Storage,
+  ML, Agente, LLM, Dashboard, CI/CD, Monitoreo, Validación de calidad).
+- **Estimación de costos:** $34–130 USD/mes con dos escenarios de ROI
+  (vs inacción y vs operación manual razonable).
+
+### Gemini 2.5 Flash vs 1.5 Pro
+
+El brief original especifica Gemini 1.5 Pro. Se eligió 2.5 Flash por:
+(1) latencia ~3× menor para respuestas del agente, (2) tier gratuita
+con 10 RPM suficiente para prototipo, (3) calidad comparable para
+el rol de explicación (no genera código ni razona sobre datos crudos).
+Documentado en `docs/architecture_gcp.md`.
+
+### Esqueleto de presentación: 17 slides, 60 minutos
+
+`docs/presentation/outline.md` con dos narrativas paralelas:
+- **Gerente de IA (9 slides, 25 min):** problema → dataset →
+  régimen 53:1 → modelo + leakage → restricción N=3 → backtest →
+  bugs como disciplina metodológica → agente LangGraph → GCP.
+- **Director Supply Chain (8 slides, 23 min):** costo de inacción →
+  qué hace el sistema → resultado 71% → honestidad sobre limitaciones →
+  requisitos → ROI en dos escenarios → hoja de ruta → Go/No-Go.
+- Cierre con resumen ejecutivo para ambas audiencias.
+
+### 18 preguntas hostiles anticipadas
+
+`docs/presentation/preguntas_hostiles.md`:
+- 8 técnicas, 8 de negocio, 2 trampa.
+- 13 de probabilidad ALTA.
+- Patrón de respuesta: reconocer limitación → mostrar cómo la
+  arquitectura responde → redirigir al piloto como mecanismo de
+  validación.
+
+### Decisiones clave del Día 4
+
+- Argumento de ROI en dos escenarios (vs inacción y vs operación
+  actual) para ser defendible bajo cualquier supuesto de la audiencia.
+- Bugs al cierre de la narrativa técnica (slide 7), no al inicio:
+  cierre de "disciplina metodológica".
+- Demo en vivo como plan A con screenshots como fallback (plan B).
+- Screenshots pendientes de captura manual (no hay playwright/selenium).
 
 ## Definiciones de negocio
 
