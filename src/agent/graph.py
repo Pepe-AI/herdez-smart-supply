@@ -18,9 +18,31 @@ from langgraph.graph import END, START, StateGraph
 from src.agent.prompts import SYSTEM_PROMPT
 from src.agent.state import AgentState
 from src.agent.tools import _config, _day_data, get_tools
+from src.data.config import get_settings
 from src.economics.costs_v2 import generate_alerts, prioritize_and_allocate
 
 logger = logging.getLogger(__name__)
+
+
+def get_llm():
+    """Crea el LLM según la disponibilidad de GOOGLE_API_KEY.
+
+    Con key: Gemini 2.5 Flash real.
+    Sin key: MockLLM que aprueba el plan determinista.
+    """
+    settings = get_settings()
+    if settings.google_api_key:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        logger.info("Usando Gemini 2.5 Flash (API key disponible)")
+        return ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            google_api_key=settings.google_api_key,
+            temperature=0.1,
+        )
+
+    logger.info("Usando MockLLM (sin GOOGLE_API_KEY)")
+    return None
 
 
 # --- Nodo 1: Generar alertas (determinista) ---
@@ -140,25 +162,27 @@ def should_use_tools(state: AgentState) -> Literal["tools", "explain"]:
 
 
 # --- Constructor del grafo ---
+class _MockLLM:
+    """Mock que aprueba el plan determinista sin cambios."""
+
+    def invoke(self, messages):
+        return AIMessage(
+            content="Plan aprobado. Resumen: sin cambios al plan determinista."
+        )
+
+    def bind_tools(self, tools):
+        return self
+
+
 def build_graph(llm=None, config=None):
     """Construye el grafo del agente económico.
 
     Args:
-        llm: ChatModel (Gemini o mock). Si None, usa mock.
+        llm: ChatModel (Gemini o mock). Si None, detecta via get_llm().
         config: CapacityConfig. Si None, usa default.
     """
     if llm is None:
-        # Mock LLM que aprueba el plan determinista sin cambios
-        class _MockLLM:
-            def invoke(self, messages):
-                return AIMessage(
-                    content="Plan aprobado. Resumen: sin cambios al plan determinista."
-                )
-
-            def bind_tools(self, tools):
-                return self
-
-        llm = _MockLLM()
+        llm = get_llm() or _MockLLM()
 
     tools = get_tools()
     llm_with_tools = llm.bind_tools(tools) if hasattr(llm, "bind_tools") else llm

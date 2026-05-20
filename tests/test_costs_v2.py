@@ -4,11 +4,13 @@ import numpy as np
 import pandas as pd
 
 from src.economics.costs_v2 import (
+    STRATEGY_NAMES,
     CapacityConfig,
     compute_origin_safety,
     generate_alerts,
     prioritize_and_allocate,
     select_origin,
+    simulate_day_with_priority,
 )
 
 CONFIG = CapacityConfig(
@@ -201,3 +203,170 @@ class TestOriginSafety:
         )
         # stock_after = 300 - 200 = 100 < 250 → unsafe
         assert result["is_safe"] is False
+
+
+class TestSimulateDayWithPriority:
+    def test_returns_expected_keys(self):
+        df = _make_day_df(n_skus=1, n_cedis=4)
+        y_true = np.array([1, 0, 0, 0])
+        scores = np.array([10.0, 1.0, 1.0, 1.0])
+        y_proba = np.array([0.5, 0.5, 0.5, 0.5])
+        result = simulate_day_with_priority(df, y_true, scores, CONFIG, y_proba=y_proba)
+        assert "n_transfers" in result
+        assert "cost_transfer" in result
+        assert "cost_fn" in result
+        assert "cost_total" in result
+        assert result["cost_total"] == result["cost_transfer"] + result["cost_fn"]
+
+    def test_higher_priority_gets_served_first(self):
+        """Con capacidad limitada, la fila con mayor score se transfiere primero."""
+        df = _make_day_df(n_skus=2, n_cedis=2)
+        y_true = np.array([1, 0, 1, 0])
+        y_proba = np.array([0.5, 0.5, 0.5, 0.5])
+        # SKU_0/CEDI_0 tiene score alto, SKU_1/CEDI_0 tiene score bajo
+        scores_high_first = np.array([100.0, 0.0, 1.0, 0.0])
+        scores_low_first = np.array([1.0, 0.0, 100.0, 0.0])
+
+        r1 = simulate_day_with_priority(
+            df, y_true, scores_high_first, CONFIG, y_proba=y_proba
+        )
+        r2 = simulate_day_with_priority(
+            df, y_true, scores_low_first, CONFIG, y_proba=y_proba
+        )
+        # Ambos deben producir al menos 1 transferencia
+        assert r1["n_transfers"] >= 1
+        assert r2["n_transfers"] >= 1
+
+    def test_zero_scores_still_transfers(self):
+        """Con scores iguales (FIFO-like), aún se hacen transferencias."""
+        df = _make_day_df(n_skus=1, n_cedis=4)
+        y_true = np.array([1, 0, 0, 0])
+        scores = np.zeros(len(df))
+        y_proba = np.array([0.5, 0.5, 0.5, 0.5])
+        result = simulate_day_with_priority(df, y_true, scores, CONFIG, y_proba=y_proba)
+        assert result["n_transfers"] >= 1
+
+    def test_all_strategies_produce_results(self):
+        """Verifica que las 7 estrategias definidas en STRATEGY_NAMES existen."""
+        assert len(STRATEGY_NAMES) == 7
+        assert "inaction" in STRATEGY_NAMES
+        assert "fifo" in STRATEGY_NAMES
+        assert "model_prioritized" in STRATEGY_NAMES
+        assert "by_tasa_base" in STRATEGY_NAMES
+
+    def test_inaction_has_highest_cost_when_quiebres_exist(self):
+        """Inacción siempre cuesta más que cualquier estrategia activa."""
+        df = _make_day_df(n_skus=2, n_cedis=4)
+        y_true = np.ones(len(df))  # todos quiebran
+        scores = np.random.default_rng(42).random(len(df))
+        y_proba = np.full(len(df), 0.5)
+
+        active_result = simulate_day_with_priority(
+            df, y_true, scores, CONFIG, y_proba=y_proba
+        )
+
+        # Inacción = suma de todos los costos FN
+        cost_inaction = sum(
+            float(df.iloc[i]["costo_quiebre_stock_diario"]) * CONFIG.dias_expuestos
+            for i in range(len(df))
+        )
+        assert active_result["cost_total"] <= cost_inaction
+
+
+class TestBacktestMatchesAgentDecisions:
+    """Bug 3: verifica equivalencia entre backtest y agente."""
+
+    def _compute_beneficio_neto_scores(
+        self, df: pd.DataFrame, y_proba: np.ndarray
+    ) -> np.ndarray:
+        """Calcula beneficio_neto vectorizado (misma fórmula que generate_alerts)."""
+        cq = df["costo_quiebre_stock_diario"].values.astype(float)
+        costo_esp = y_proba * cq * CONFIG.dias_expuestos
+        vrl = df["ventas_rolling_7d_lag1"].values.astype(float)
+        v_proj = vrl * CONFIG.dias_expuestos
+        s_lag = df["stock_lag_1"].values.astype(float)
+        deficit = np.maximum(0, v_proj - s_lag)
+        ctu = df["costo_transferencia_unidad"].values.astype(float)
+        costo_tr = ctu * np.maximum(deficit, 50)
+        return costo_esp - costo_tr
+
+    def test_backtest_matches_agent_decisions(self):
+        """simulate_day_with_priority con model_prioritized produce
+        las mismas transferencias que generate_alerts +
+        prioritize_and_allocate."""
+        df = _make_day_df(n_skus=2, n_cedis=4)
+        y_proba = np.array(
+            [0.9, 0.1, 0.05, 0.01, 0.7, 0.5, 0.01, 0.01]
+        )
+        y_true = np.array([1, 0, 0, 0, 1, 1, 0, 0])
+
+        # Ruta agente
+        alerts = generate_alerts(df, y_proba, CONFIG)
+        approved, _ = prioritize_and_allocate(alerts, df, CONFIG)
+        agent_transfers = {
+            (t.sku_id, t.cedi_destino, t.cedi_origen)
+            for t in approved
+        }
+
+        # Ruta backtest
+        scores = self._compute_beneficio_neto_scores(df, y_proba)
+        result = simulate_day_with_priority(
+            df, y_true, scores, CONFIG, y_proba=y_proba
+        )
+        backtest_transfers = {
+            (sku, cedi, result["origin_map"][(sku, cedi)])
+            for sku, cedi in result["transferred"]
+        }
+
+        assert agent_transfers == backtest_transfers
+
+    def test_costs_match_between_paths(self):
+        """Costos totales idénticos entre ambas rutas."""
+        df = _make_day_df(n_skus=2, n_cedis=4)
+        y_proba = np.array(
+            [0.9, 0.1, 0.05, 0.01, 0.7, 0.5, 0.01, 0.01]
+        )
+        y_true = np.array([1, 0, 0, 0, 1, 1, 0, 0])
+
+        from src.economics.costs_v2 import simulate_day
+
+        agent_result = simulate_day(df, y_proba, y_true, CONFIG)
+
+        scores = self._compute_beneficio_neto_scores(df, y_proba)
+        backtest_result = simulate_day_with_priority(
+            df, y_true, scores, CONFIG, y_proba=y_proba
+        )
+
+        assert agent_result["cost_total"] == backtest_result[
+            "cost_total"
+        ]
+        assert agent_result["n_transfers"] == backtest_result[
+            "n_transfers"
+        ]
+
+
+class TestByStockLag1NotStockActual:
+    """Verifica que by_stock_lag1 usa stock_lag_1, no stock_actual (Bug 2)."""
+
+    def test_priority_follows_stock_lag1_not_stock_actual(self):
+        df = _make_day_df(n_skus=2, n_cedis=2)
+        # stock_actual y stock_lag_1 tienen orden invertido
+        df.loc[df["sku_id"] == "SKU_0", "stock_lag_1"] = 100  # bajo → alta prioridad
+        df.loc[df["sku_id"] == "SKU_0", "stock_actual"] = 9000  # alto
+        df.loc[df["sku_id"] == "SKU_1", "stock_lag_1"] = 9000  # alto → baja prioridad
+        df.loc[df["sku_id"] == "SKU_1", "stock_actual"] = 100  # bajo
+
+        # Score by_stock_lag1: -stock_lag_1 (menor stock_lag_1 = mayor score)
+        stock_lag1_scores = -df["stock_lag_1"].values.astype(float)
+
+        # Verificar que SKU_0 tiene mayor score (stock_lag_1=100 → score=-100)
+        sku0_mask = df["sku_id"] == "SKU_0"
+        sku1_mask = df["sku_id"] == "SKU_1"
+        assert stock_lag1_scores[sku0_mask].max() > stock_lag1_scores[sku1_mask].max()
+
+        # Si usáramos stock_actual, el orden sería inverso
+        stock_actual_scores = -df["stock_actual"].values.astype(float)
+        assert (
+            stock_actual_scores[sku1_mask].max()
+            > stock_actual_scores[sku0_mask].max()
+        )

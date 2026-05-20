@@ -2,9 +2,11 @@
 
 import numpy as np
 import pandas as pd
+import pytest
 
-from src.agent.graph import build_graph
+from src.agent.graph import _MockLLM, build_graph, get_llm
 from src.agent.tools import set_day_context
+from src.data.config import get_settings
 from src.economics.costs_v2 import CapacityConfig
 
 CONFIG = CapacityConfig()
@@ -113,3 +115,67 @@ class TestDecisionLogic:
             # Primera transferencia debe ser del SKU de mayor costo
             first = result["transfers"][0]
             assert first["sku_id"] == "SKU_Salsa"
+
+
+HAS_API_KEY = bool(get_settings().google_api_key)
+
+
+@pytest.mark.skipif(not HAS_API_KEY, reason="GOOGLE_API_KEY no disponible")
+class TestGeminiEquivalence:
+    """Verifica que mock y Gemini real producen decisiones identicas.
+
+    Solo la explicacion cambia; transfers y deferred deben ser iguales
+    porque los nodos 1-3 son deterministas.
+    """
+
+    def test_transfers_match(self):
+        df = _make_day_df()
+        proba = np.array([0.9, 0.1, 0.1, 0.1, 0.8, 0.1, 0.1, 0.1])
+
+        set_day_context(df, proba)
+        mock_graph = build_graph(llm=_MockLLM())
+        mock_result = mock_graph.invoke(
+            {
+                "messages": [],
+                "fecha": "2024-04-15",
+                "alerts": [],
+                "evaluated_alerts": [],
+                "transfers": [],
+                "deferred": [],
+                "capacity_used": {},
+                "explanation": "",
+            }
+        )
+
+        set_day_context(df, proba)
+        gemini_llm = get_llm()
+        gemini_graph = build_graph(llm=gemini_llm)
+        gemini_result = gemini_graph.invoke(
+            {
+                "messages": [],
+                "fecha": "2024-04-15",
+                "alerts": [],
+                "evaluated_alerts": [],
+                "transfers": [],
+                "deferred": [],
+                "capacity_used": {},
+                "explanation": "",
+            }
+        )
+
+        mock_transfers = [
+            (t["sku_id"], t["cedi_destino"], t["cedi_origen"])
+            for t in mock_result["transfers"]
+        ]
+        gemini_transfers = [
+            (t["sku_id"], t["cedi_destino"], t["cedi_origen"])
+            for t in gemini_result["transfers"]
+        ]
+        assert mock_transfers == gemini_transfers
+
+        assert len(mock_result["deferred"]) == len(
+            gemini_result["deferred"]
+        )
+
+        assert gemini_result["explanation"] != ""
+        assert gemini_result["explanation"] != mock_result["explanation"]

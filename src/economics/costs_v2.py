@@ -262,50 +262,115 @@ def simulate_day(
     }
 
 
-def _simulate_strategy_random_truncated(
+def simulate_day_with_priority(
     df_day: pd.DataFrame,
     y_true: np.ndarray,
+    scores: np.ndarray,
     config: CapacityConfig,
+    y_proba: np.ndarray,
 ) -> dict:
-    """Baseline: transferir todo, truncar random a N por CEDI."""
+    """Simula un día con priorización uniforme por scores.
+
+    Aplica dos filtros económicos antes de priorizar:
+    1. Umbral económico: p > config.economic_threshold (0.0187)
+    2. Beneficio neto positivo: costo_esperado > costo_transferencia
+
+    La probabilidad p viene del modelo ML (y_proba). El filtro
+    económico requiere p para todas las estrategias; la
+    priorización usa scores (que varían por estrategia).
+    Esto garantiza que ninguna estrategia tome decisiones
+    económicamente irracionales.
+
+    Args:
+        df_day: Datos del día (SKU x CEDI).
+        y_true: Labels reales (1=quiebre).
+        scores: Score de prioridad por fila (mayor = más prioritario).
+        config: Configuración de capacidad.
+        y_proba: Probabilidades del modelo para filtros económicos.
+
+    Returns:
+        Dict con n_transfers, cost_transfer, cost_fn, cost_total,
+        transferred, origin_map.
+    """
+    order = np.argsort(-scores)
+
     capacity_used: dict[str, int] = {}
     transferred: set[tuple[str, str]] = set()
+    origin_map: dict[tuple[str, str], str] = {}
     cost_transfer = 0.0
 
-    # Orden arbitrario (filas como vienen)
-    for _, row in df_day.iterrows():
-        sku = row["sku_id"]
-        cedi = row["cedi"]
+    for idx in order:
+        idx_int = int(idx)
+        row = df_day.iloc[idx_int]
+        sku = str(row["sku_id"])
+        cedi = str(row["cedi"])
 
-        # Buscar cualquier origen con capacidad
-        origins = df_day[(df_day["sku_id"] == sku) & (df_day["cedi"] != cedi)]
-        for _, orig_row in origins.iterrows():
-            orig_cedi = orig_row["cedi"]
-            if capacity_used.get(orig_cedi, 0) >= config.max_transfers_per_cedi:
-                continue
-            # Transferir
-            deficit = max(
-                float(row.get("ventas_rolling_7d_lag1", 0)) * config.dias_expuestos
-                - float(row.get("stock_lag_1", 0)),
-                50,
-            )
-            cost_transfer += float(row["costo_transferencia_unidad"]) * deficit
-            capacity_used[orig_cedi] = capacity_used.get(orig_cedi, 0) + 1
-            transferred.add((sku, cedi))
-            break
+        if (sku, cedi) in transferred:
+            continue
 
-    # FN: quiebres no cubiertos
+        ventas_lag = float(row.get("ventas_rolling_7d_lag1", 0))
+        ventas_proj = ventas_lag * config.dias_expuestos
+        stock_lag = float(row.get("stock_lag_1", 0))
+        deficit = max(0, ventas_proj - stock_lag)
+
+        p = float(y_proba[idx_int])
+        if p <= config.economic_threshold:
+            continue
+        cq = float(row["costo_quiebre_stock_diario"])
+        costo_esp = p * cq * config.dias_expuestos
+        ctu = float(row["costo_transferencia_unidad"])
+        costo_tr_est = ctu * max(deficit, 50)
+        if costo_esp - costo_tr_est <= 0:
+            continue
+
+        result = select_origin(
+            sku, cedi, df_day, capacity_used, config
+        )
+        if result is None:
+            continue
+
+        cedi_origen, origin_units = result
+        units = min(origin_units, max(int(deficit), 50))
+
+        cost_transfer += (
+            float(row["costo_transferencia_unidad"]) * units
+        )
+        transferred.add((sku, cedi))
+        origin_map[(sku, cedi)] = cedi_origen
+        capacity_used[cedi_origen] = (
+            capacity_used.get(cedi_origen, 0) + 1
+        )
+
     cost_fn = 0.0
     for i, (_, row) in enumerate(df_day.iterrows()):
-        if y_true[i] == 1 and (row["sku_id"], row["cedi"]) not in transferred:
-            cost_fn += float(row["costo_quiebre_stock_diario"]) * config.dias_expuestos
+        if (
+            y_true[i] == 1
+            and (row["sku_id"], row["cedi"]) not in transferred
+        ):
+            cost_fn += (
+                float(row["costo_quiebre_stock_diario"])
+                * config.dias_expuestos
+            )
 
     return {
         "n_transfers": len(transferred),
         "cost_transfer": cost_transfer,
         "cost_fn": cost_fn,
         "cost_total": cost_transfer + cost_fn,
+        "transferred": transferred,
+        "origin_map": origin_map,
     }
+
+
+STRATEGY_NAMES = [
+    "inaction",
+    "fifo",
+    "by_stock_lag1",
+    "heuristic_deficit",
+    "model_prioritized",
+    "by_costo_quiebre",
+    "by_tasa_base",
+]
 
 
 def run_capacity_comparison(
@@ -313,12 +378,28 @@ def run_capacity_comparison(
     feature_cols: list[str],
     n_splits: int = 5,
 ) -> pd.DataFrame:
-    """Compara estrategias bajo restricción N=3 con TimeSeriesSplit.
+    """Compara 7 estrategias bajo restricción N=3 con TimeSeriesSplit.
+
+    Todas las estrategias aplican los mismos filtros económicos
+    antes de priorizar (umbral p > 0.0187 y beneficio_neto > 0).
+    La probabilidad p viene del modelo ML para todas; la única
+    diferencia entre estrategias es el criterio de ordenamiento
+    dentro del conjunto ya filtrado. Esto garantiza comparación
+    justa: ninguna estrategia toma decisiones irracionales.
+
+    Correcciones aplicadas:
+    - Bug 1: select_origin() uniforme para todas
+    - Bug 2: by_stock_lag1 usa stock_lag_1 (no stock_actual)
+    - Bug 3: filtros económicos uniformes (no solo para modelo)
 
     Estrategias:
-    1. inaction: predice todo 0
-    2. all_positive_random: transfiere todo, trunca random a N=3/CEDI
-    3. model_prioritized: usa probabilidades para priorizar top-N
+    1. inaction: no transfiere nada
+    2. fifo: orden de llegada (filas del DataFrame)
+    3. by_stock_lag1: menor stock de ayer primero
+    4. heuristic_deficit: mayor déficit proyectado primero
+    5. model_prioritized: mayor beneficio_neto
+    6. by_costo_quiebre: mayor costo de quiebre diario primero
+    7. by_tasa_base: mayor tasa histórica de quiebre primero
 
     Returns:
         DataFrame con costo por fold para cada estrategia.
@@ -340,61 +421,132 @@ def run_capacity_comparison(
         df_val = df_eval.iloc[va_idx]
         y_val = y.iloc[va_idx].values
 
-        # Entrenar modelo
         model = lgb.LGBMClassifier(**LGBM_PARAMS)
         model.fit(df_train[feature_cols], y.iloc[tr_idx])
         y_proba = model.predict_proba(df_val[feature_cols])[:, 1]
 
-        # Agrupar por fecha
+        tasa_base_map = (
+            df_train.groupby(["sku_id", "cedi"])["quiebre_proyectado"].mean()
+        )
+
         dates = df_val["fecha"].unique()
 
-        fold_results: dict[str, float] = {
-            "fold": fold,
-            "inaction": 0.0,
-            "all_positive_random": 0.0,
-            "model_prioritized": 0.0,
-        }
+        fold_results: dict[str, float] = {"fold": float(fold)}
+        for name in STRATEGY_NAMES:
+            fold_results[name] = 0.0
 
         for date in dates:
             mask = df_val["fecha"] == date
             df_day = df_val[mask].reset_index(drop=True)
             y_day = y_val[mask.values]
             proba_day = y_proba[mask.values]
+            n = len(df_day)
 
-            # 1. Inacción
-            cost_inaction = float(
-                np.sum(
-                    df_day.loc[y_day == 1, "costo_quiebre_stock_diario"]
-                    * config.dias_expuestos
-                )
+            # 1. Inacción: solo costos FN
+            for i in range(n):
+                if y_day[i] == 1:
+                    fold_results["inaction"] += (
+                        float(df_day.iloc[i]["costo_quiebre_stock_diario"])
+                        * config.dias_expuestos
+                    )
+
+            # 2. FIFO: orden de llegada
+            fifo_scores = np.arange(n, 0, -1, dtype=float)
+            fold_results["fifo"] += simulate_day_with_priority(
+                df_day, y_day, fifo_scores, config,
+                y_proba=proba_day,
+            )["cost_total"]
+
+            # 3. by_stock_lag1: menor stock de ayer (Bug 2)
+            stock_scores = (
+                -df_day["stock_lag_1"].values.astype(float)
             )
-            fold_results["inaction"] += cost_inaction
+            fold_results["by_stock_lag1"] += (
+                simulate_day_with_priority(
+                    df_day, y_day, stock_scores, config,
+                    y_proba=proba_day,
+                )["cost_total"]
+            )
 
-            # 2. All positive random truncated
-            day_random = _simulate_strategy_random_truncated(df_day, y_day, config)
-            fold_results["all_positive_random"] += day_random["cost_total"]
+            # 4. heuristic_deficit: mayor déficit proyectado
+            deficit_scores = (
+                df_day["ventas_rolling_7d_lag1"].values
+                * config.dias_expuestos
+                - df_day["stock_lag_1"].values
+            ).astype(float)
+            fold_results["heuristic_deficit"] += (
+                simulate_day_with_priority(
+                    df_day, y_day, deficit_scores, config,
+                    y_proba=proba_day,
+                )["cost_total"]
+            )
 
-            # 3. Model prioritized
-            day_model = simulate_day(df_day, proba_day, y_day, config)
-            fold_results["model_prioritized"] += day_model["cost_total"]
+            # 5. model_prioritized: beneficio_neto
+            cq_v = (
+                df_day["costo_quiebre_stock_diario"]
+                .values.astype(float)
+            )
+            costo_esp = proba_day * cq_v * config.dias_expuestos
+            vrl = (
+                df_day["ventas_rolling_7d_lag1"]
+                .values.astype(float)
+            )
+            v_proj = vrl * config.dias_expuestos
+            s_lag = df_day["stock_lag_1"].values.astype(float)
+            deficit_est = np.maximum(0, v_proj - s_lag)
+            ctu = (
+                df_day["costo_transferencia_unidad"]
+                .values.astype(float)
+            )
+            costo_tr = ctu * np.maximum(deficit_est, 50)
+            model_scores = costo_esp - costo_tr
+            fold_results["model_prioritized"] += (
+                simulate_day_with_priority(
+                    df_day, y_day, model_scores, config,
+                    y_proba=proba_day,
+                )["cost_total"]
+            )
+
+            # 6. by_costo_quiebre: mayor costo quiebre diario
+            cq_scores = (
+                df_day["costo_quiebre_stock_diario"]
+                .values.astype(float)
+            )
+            fold_results["by_costo_quiebre"] += (
+                simulate_day_with_priority(
+                    df_day, y_day, cq_scores, config,
+                    y_proba=proba_day,
+                )["cost_total"]
+            )
+
+            # 7. by_tasa_base: mayor tasa histórica quiebre
+            tb_scores = np.array(
+                [
+                    tasa_base_map.get(
+                        (row["sku_id"], row["cedi"]), 0.0
+                    )
+                    for _, row in df_day.iterrows()
+                ]
+            )
+            fold_results["by_tasa_base"] += (
+                simulate_day_with_priority(
+                    df_day, y_day, tb_scores, config,
+                    y_proba=proba_day,
+                )["cost_total"]
+            )
 
         results.append(fold_results)
         logger.info(
-            f"Fold {fold}: inaction=${fold_results['inaction']:,.0f}  "
-            f"random=${fold_results['all_positive_random']:,.0f}  "
-            f"model=${fold_results['model_prioritized']:,.0f}"
+            f"Fold {fold}: "
+            + " | ".join(
+                f"{k}=${fold_results[k]:,.0f}" for k in STRATEGY_NAMES
+            )
         )
 
     results_df = pd.DataFrame(results)
 
-    # Headline number
-    mean_random = results_df["all_positive_random"].mean()
-    mean_model = results_df["model_prioritized"].mean()
-    if mean_random > 0:
-        pct_improvement = (mean_random - mean_model) / mean_random * 100
-        logger.info(
-            f"HEADLINE: modelo reduce costo {pct_improvement:.0f}%% vs "
-            f"random truncated (${mean_model:,.0f} vs ${mean_random:,.0f})"
-        )
+    logger.info("--- Resumen promedio por fold ---")
+    for name in STRATEGY_NAMES:
+        logger.info(f"  {name}: ${results_df[name].mean():,.0f}")
 
     return results_df
